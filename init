@@ -1,0 +1,233 @@
+#!/bin/sh
+# better-initramfs project
+# https://bitbucket.org/piotrkarbowski/better-initramfs
+# Copyright (c) 2010-2018, Piotr Karbowski <piotr.karbowski@gmail.com>
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without 
+# modification, are permitted provided that the following conditions are met:
+#    * Redistributions of source code must retain the above copyright notice,
+#      this list of conditions and the following disclaimer.
+#    * Redistributions in binary form must reproduce the above copyright notice,
+#      this list of conditions and the following disclaimer in the documentation
+#      and/or other materials provided with the distribution.
+#    * Neither the name of the Piotr Karbowski nor the names of its contributors
+#      may be used to endorse or promote products derived from this software
+#      without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+# THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE
+
+# Load functions.
+. /functions.sh
+
+echo -e "\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[39m\e[0mLoading fake time..."
+date -s "2026-01-01 12:00:00"
+
+run_hooks init
+
+# Prepare dirs
+run dodir /dev /newroot /sbin /proc /sys /etc /var/log /var/run /run /run/cryptsetup
+for d in /lib /usr/lib; do
+   # ! -e && ! -h: also skip broken symlinks
+   if [ -d "${d}" ] && [ ! -e "${d}64" ] && [ ! -h "${d}64" ]; then
+      run ln -s "${d}" "${d}64"
+   fi
+done
+unset -v d
+
+# Basic /dev content, we need it as fast as possible.
+[ ! -e /dev/console ]  && run mknod /dev/console c 5 1
+[ ! -e /dev/null ]     && run mknod /dev/null c 1 3
+[ ! -e /dev/tty ]      && run mknod /dev/tty c 5 0
+[ ! -e /dev/urandom ]  && run mknod /dev/urandom c 1 9
+[ ! -e /dev/random ]   && run mknod /dev/random c 1 8
+[ ! -e /dev/zero ]     && run mknod /dev/zero c 1 5
+
+# Save IFS so we can easly restore it if we ever change it.
+readonly default_ifs="${IFS}"
+
+# Basic
+kernelver="$(uname -r)"
+ver="$(cat /VERSION)"
+
+sleep 2
+# Clear the screen
+clear
+
+einfo "better-initramfs ${ver}. Linux kernel ${kernelver}.\n"
+echo -e "\nWelcome to better-initramfs ${ver}. Linux kernel ${kernelver}.\n" > /etc/motd
+
+sleep 1
+
+emount /proc /sys > /dev/null
+
+# Disable kernel messages from popping onto the screen
+echo 0 > /proc/sys/kernel/printk
+
+process_commandline_options
+InitializeBusybox > /dev/null
+emount /dev > /dev/null
+run_hooks early
+loadkeymap
+
+# Let's try to support all possible combinations of storage layers.
+use bcache register_bcache_devices
+use softraid InitializeSoftwareRaid && use bcache register_bcache_devices
+use lvm InitializeLVM && use bcache register_bcache_devices
+use luks InitializeLUKS && use lvm InitializeLVM && use bcache register_bcache_devices
+use rescueshell rescueshell
+use swsusp && SwsuspResume
+use tuxonice TuxOnIceResume
+run_hooks pre_newroot_mount
+use rootdelay rootdelay
+
+  sleep 3
+
+if mount LABEL=BATOCERA /newroot 2>/dev/null; then
+
+echo -e "\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[39m\e[0mBatocera for PS4 seems to be installed! Trying to boot now..."
+
+    # --- OverlayFS setup (Batocera compatible) ---
+    
+    echo ""
+    echo "======================================"
+    echo " Batocera OverlayFS initialization"
+    echo "======================================"
+
+    mkdir -p /overlay
+
+    mount -t tmpfs -o size=256M tmpfs /overlay
+
+    echo "[1/8] Creating overlay directories..."
+
+    mkdir -p /overlay/base || echo "ERROR: cannot create /overlay/base"
+    mkdir -p /overlay/overlay || echo "ERROR: cannot create /overlay/overlay"
+    mkdir -p /overlay/work || echo "ERROR: cannot create /overlay/work"  
+    mkdir -p /overlay/saved || echo "ERROR: cannot create /overlay/saved"
+
+    echo "[2/8] Moving real rootfs to base..."
+    if mount --move /newroot /overlay/base; then
+        echo "OK: rootfs moved to /overlay/base"
+    else
+        echo "FATAL: cannot move rootfs to base"
+    fi
+
+    echo "[3/8] Creating empty newroot..."
+    mkdir -p /newroot || echo "ERROR: cannot create /newroot"
+
+    echo "[4/8] Checking for persistent overlay (BATOCERA)..."
+
+    OVERLAY_FILE="/overlay/base/boot/boot/overlay"
+    USE_SAVED_OVERLAY=0
+
+    if [ -f "$OVERLAY_FILE" ]; then
+        echo "OK: overlay file found ($OVERLAY_FILE)"
+        echo "Mounting persistent overlay file..."
+
+        if mount -t ext4 -o ro,loop "$OVERLAY_FILE" /overlay/saved; then
+            echo "OK: overlay file mounted at /overlay/saved"
+
+            echo "Copy saved overlay into RAM overlay..."
+            cp -a /overlay/saved/. /overlay/overlay/
+
+            umount /overlay/saved
+            USE_SAVED_OVERLAY=1
+        else
+            echo "ERROR: failed to mount overlay file"
+        fi
+    else
+        echo "INFO: no overlay file found, using RAM overlay only"
+    fi
+
+
+    echo "[5/8] Mounting final overlay filesystem..."
+    if [ "$USE_SAVED_OVERLAY" -eq 1 ]; then
+        echo "Using: saved overlay + RAM overlay"
+    else
+        echo "Using: RAM overlay only"
+    fi
+    mount -t overlay overlay \
+            -o rw,lowerdir=/overlay/base,upperdir=/overlay/overlay,workdir=/overlay/work \
+            /newroot || echo "FATAL: overlayfs mount failed"
+	
+	echo "[6/8] Mounting persistent userdata..."
+	mkdir -p /newroot/userdata
+
+	if mount LABEL=SHARE /newroot/userdata; then
+		echo "OK: /userdata mounted persistently"
+	else
+		echo "WARN: failed to mount SHARE partition"
+	fi
+
+#    echo "[5.5/7] Moving real /boot into new root..."
+#    mkdir -p /newroot/boot
+#    mount --move /boot /newroot/boot || echo "FATAL: failed to move /boot"
+
+    echo "[7/8] Recreating mountpoints in new root..."
+    #mkdir -p /newroot/userdata
+    mkdir -p /newroot/proc
+    mkdir -p /newroot/sys
+    mkdir -p /newroot/dev
+    mkdir -p /newroot/run
+    mkdir -p /newroot/tmp
+
+    echo "[8/8] OverlayFS setup completed"
+    echo "======================================"
+    echo ""
+  
+  sleep 2
+
+    echo "Remounting BATOCERA system partition for disk size reporting..."
+
+    mkdir -p /mnt/batocera-real
+
+    if mount LABEL=BATOCERA /mnt/batocera-real; then
+        echo "OK: BATOCERA remounted at /mnt/batocera-real"
+    else
+        echo "FATAL: cannot remount BATOCERA"
+    fi
+    
+    mkdir -p /newroot/boot
+    echo "Bind folder /boot BATOCERA partition on /boot..."
+    if mount --bind /mnt/batocera-real/boot /newroot/boot; then
+        echo "OK: Bind folder /boot BATOCERA partition on /boot"
+    else
+        echo "FATAL: cannot Bind folder /boot BATOCERA partition on /boot"
+    fi
+    
+    echo "Umount mnt/batocera-real..."
+    if umount /mnt/batocera-real; then
+        echo "OK: Umount mnt/batocera-real"
+    else
+        echo "FATAL: cannot umount mnt/batocera-real"
+    fi
+    rmdir /mnt/batocera-real
+
+    emount /newroot/usr > /dev/null
+	cleanup > /dev/null
+	moveDev > /dev/null
+	eumount /sys /proc > /dev/null
+	run_hooks pre_switch_root > /dev/null
+
+    # Rebind overlay RAM dirs into newroot so userspace can see them
+    mkdir -p /newroot/overlay
+    mount --move /overlay /newroot/overlay || echo "FATAL: failed to move /overlay"
+	boot_newroot > /dev/null
+else
+  echo -e "\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[33m\e[0mBatocera for PS4 is not installed!"
+	echo -e "\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[39m\e[0mSwitching to installation wizard..."
+	sleep 2
+	exec install.sh
+fi
+
+rescueshell
