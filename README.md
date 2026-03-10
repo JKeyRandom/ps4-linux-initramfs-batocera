@@ -22,6 +22,8 @@ The goal of this initramfs is to provide a reliable and user-friendly installati
 
 - No manual partitioning required
 
+- Manual updates: Copy the new version of Batocera PS4 and the sha256 file to the "SHARE/batocera/" partition or directly via Samba to the root directory and rename to "batocera_update.tar.xz" and batocera_update.tar.xz.sha256. Then restart to perform the update without losing the data on the SHARE partition.
+
 ## 🧱 OverlayFS-based Boot (Batocera-style)
 
 - Boots the system using overlayfs, just like official Batocera
