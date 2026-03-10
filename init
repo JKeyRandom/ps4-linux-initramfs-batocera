@@ -97,6 +97,162 @@ if mount LABEL=BATOCERA /newroot 2>/dev/null; then
 
 echo -e "\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[39m\e[0mBatocera for PS4 seems to be installed! Trying to boot now..."
 
+
+	 # Mount SHARE temp
+    mkdir -p /newroot/userdata
+    mount LABEL=SHARE /newroot/userdata 2>/dev/null
+	
+	UPDATE_FILE="/newroot/userdata/batocera/batocera_update.tar.xz"
+    UPDATE_SHA="/newroot/userdata/batocera/batocera_update.tar.xz.sha256"
+
+    if [ -f "$UPDATE_FILE" ]; then
+
+        echo "======================================"
+        echo " Batocera UPDATE detected!"
+        echo "======================================"
+        sleep 2
+
+        if [ ! -f "$UPDATE_SHA" ]; then
+            echo "ERROR: Missing SHA256 file!"
+            rescueshell
+        fi
+
+        cd /newroot/userdata/batocera
+        echo "Verifying SHA256 checksum..."
+
+        EXPECTED=$(cat batocera_update.tar.xz.sha256)
+
+        if command -v pv >/dev/null 2>&1; then
+            ACTUAL=$(pv "$UPDATE_FILE" | sha256sum | cut -d " " -f1)
+        else
+            ACTUAL=$(sha256sum "$UPDATE_FILE" | cut -d " " -f1)
+        fi
+
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "ERROR: SHA256 mismatch!"
+            rescueshell
+        fi
+
+        echo "SHA256 OK."
+
+        echo "Archive validation OK."
+		
+		echo "Umount partitions..."
+        cd /
+        sync
+        umount /newroot/userdata
+        umount /newroot
+        sleep 2
+
+        get_part() {
+        blkid | grep "LABEL=\"$1\"" | cut -d: -f1
+        }
+
+        SHAREDEV=$(get_part SHARE)
+        BATODEV=$(get_part BATOCERA)
+
+        if [ -z "$SHAREDEV" ] || [ -z "$BATODEV" ]; then
+            echo "FATAL: Required partitions not found!"
+            rescueshell
+        fi
+
+        if [ "$SHAREDEV" = "$BATODEV" ]; then
+            echo "FATAL: SHARE and BATOCERA are the same device!"
+            rescueshell
+        fi
+		
+		mkdir -p /mnt/share-temp
+
+        mount "$SHAREDEV" /mnt/share-temp || rescueshell
+
+        UPDATE_FILE="/mnt/share-temp/batocera/batocera_update.tar.xz"
+
+        echo "Formatting BATOCERA..."
+        mke2fs -t ext4 -F -L BATOCERA -O ^has_journal "$BATODEV" > /dev/null 2>&1 || {
+            echo "FATAL: format failed"
+            rescueshell
+        }
+
+        sync
+        sleep 1
+        partprobe
+
+        mkdir -p /mnt/batocera-temp
+
+        mount "$BATODEV" /mnt/batocera-temp || rescueshell
+
+        echo "Extracting update..."
+        if command -v pv >/dev/null 2>&1; then
+            pv "$UPDATE_FILE" | tar -xpJf - -C /mnt/batocera-temp --numeric-owner --warning=none
+        else
+            tar -xpJf "$UPDATE_FILE" -C /mnt/batocera-temp --numeric-owner --warning=none
+        fi || {
+            echo "FATAL: extraction failed"
+            rescueshell
+        }
+
+		
+		echo -e "\nPreparing batocera config files..."
+
+		if [ -n "$SHAREDEV" ]; then
+			output=$(blkid "$SHAREDEV" | awk 'BEGIN{FS="[=\"]"} {print $(NF-4)}')
+
+		if [ -n "$output" ]; then
+			echo "OK: detected UUID for userdata: $output"
+
+		cat >> /mnt/batocera-temp/boot/batocera-boot.conf <<EOT
+sharedevice=DEV $output
+splash.screen.enabled=1
+system.hostname=BATOCERA
+EOT
+			echo "OK: batocera-boot.conf updated"
+			
+		# Ensure /boot/boot directory exists (Batocera expects this)
+		if [ ! -d /mnt/batocera-temp/boot/boot ]; then
+			mkdir -p /mnt/batocera-temp/boot/boot && echo " Created /boot/boot"
+		fi
+
+		# Create batocera.board only once
+		BOARD_FILE="/mnt/batocera-temp/boot/boot/batocera.board"
+
+		if [ ! -f "$BOARD_FILE" ]; then
+			echo "PS4" > "$BOARD_FILE"
+			echo "Created batocera.board"
+		else
+			echo "batocera.board already exists"
+		fi	
+			
+		else
+			echo "ERROR: failed to extract UUID from $SHARE_PART"
+			fi
+		else
+			echo "ERROR: SHARE partition not found"
+		fi
+
+        echo -e "\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[39m\e[0mAdding EAP key..."
+        cp /key/eap_hdd_key.bin /mnt/batocera-temp/etc/cryptmount > /dev/null
+        #cp /lib/firmware/edid/my_edid.bin /newroot/lib/firmware/edid > /dev/null
+		
+		echo -e "\n\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[39m\e[0mUpdate completed."
+		
+		echo -e "\n\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[39m\e[0mClean updates files..."
+        rm /mnt/share-temp/batocera/batocera_update.tar.xz*
+        sync
+		
+		echo "Umount partitions..."
+        sync
+        umount /mnt/share-temp
+        umount /mnt/batocera-temp
+        sleep 2
+
+		if mount LABEL=BATOCERA /newroot 2>/dev/null; then
+			echo -e "\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[39m\e[0mBatocera for PS4 seems to be installed! Trying to boot now..."
+		else
+			echo -e "\e[31m\e[1m>\e[34m\e[1m>\e[31m\e[1m> \e[33m\e[0mNo batocera installation detected, aborting!"
+			rescueshell
+		fi
+    fi
+
     # --- OverlayFS setup (Batocera compatible) ---
     
     echo ""
